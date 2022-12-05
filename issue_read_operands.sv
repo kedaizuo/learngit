@@ -13,9 +13,8 @@
 // Description: Issues instruction from the scoreboard and fetches the operands
 //              This also includes all the forwarding logic
 
-import ariane_pkg::*;
 
-module issue_read_operands #(
+module issue_read_operands import ariane_pkg::*; #(
     parameter int unsigned NR_COMMIT_PORTS = 2
 )(
     input  logic                                   clk_i,    // Clock
@@ -28,20 +27,22 @@ module issue_read_operands #(
     output logic                                   issue_ack_o,
     // lookup rd in scoreboard
     output logic [REG_ADDR_SIZE-1:0]               rs1_o,
-    input  logic [63:0]                            rs1_i,
+    input  riscv::xlen_t                           rs1_i,
     input  logic                                   rs1_valid_i,
     output logic [REG_ADDR_SIZE-1:0]               rs2_o,
-    input  logic [63:0]                            rs2_i,
+    input  riscv::xlen_t                           rs2_i,
     input  logic                                   rs2_valid_i,
     output logic [REG_ADDR_SIZE-1:0]               rs3_o,
-    input  logic [FLEN-1:0]                        rs3_i,
+    input  rs3_len_t                               rs3_i,
     input  logic                                   rs3_valid_i,
     // get clobber input
-    input  fu_t [2**REG_ADDR_SIZE:0]               rd_clobber_gpr_i,
-    input  fu_t [2**REG_ADDR_SIZE:0]               rd_clobber_fpr_i,
+    input  fu_t [2**REG_ADDR_SIZE-1:0]             rd_clobber_gpr_i,
+    input  fu_t [2**REG_ADDR_SIZE-1:0]             rd_clobber_fpr_i,
     // To FU, just single issue for now
     output fu_data_t                               fu_data_o,
-    output logic [63:0]                            pc_o,
+    output riscv::xlen_t                           rs1_forwarding_o,  // unregistered version of fu_data_o.operanda
+    output riscv::xlen_t                           rs2_forwarding_o,  // unregistered version of fu_data_o.operandb
+    output logic [riscv::VLEN-1:0]                 pc_o,
     output logic                                   is_compressed_instr_o,
     // ALU 1
     input  logic                                   flu_ready_i,      // Fixed latency unit ready to accept a new request
@@ -61,9 +62,13 @@ module issue_read_operands #(
     output logic [2:0]                             fpu_rm_o,         // FP rm field from instr.
     // CSR
     output logic                                   csr_valid_o,      // Output is valid
+    // CVXIF
+    output logic                                   cvxif_valid_o,
+    input  logic                                   cvxif_ready_i,
+    output logic [31:0]                            cvxif_off_instr_o,
     // commit port
     input  logic [NR_COMMIT_PORTS-1:0][4:0]        waddr_i,
-    input  logic [NR_COMMIT_PORTS-1:0][63:0]       wdata_i,
+    input  logic [NR_COMMIT_PORTS-1:0][riscv::XLEN-1:0] wdata_i,
     input  logic [NR_COMMIT_PORTS-1:0]             we_gpr_i,
     input  logic [NR_COMMIT_PORTS-1:0]             we_fpr_i
     // committing instruction instruction
@@ -73,21 +78,23 @@ module issue_read_operands #(
 );
     logic stall;   // stall signal, we do not want to fetch any more entries
     logic fu_busy; // functional unit is busy
-    logic [63:0] operand_a_regfile, operand_b_regfile;  // operands coming from regfile
-    logic [FLEN-1:0] operand_c_regfile; // third operand only from fp regfile
+    riscv::xlen_t    operand_a_regfile, operand_b_regfile;  // operands coming from regfile
+    rs3_len_t operand_c_regfile; // third operand from fp regfile or gp regfile if NR_RGPR_PORTS == 3
     // output flipflop (ID <-> EX)
-    logic [63:0] operand_a_n, operand_a_q,
+    riscv::xlen_t operand_a_n, operand_a_q,
                  operand_b_n, operand_b_q,
                  imm_n, imm_q;
 
-    logic       alu_valid_n,    alu_valid_q;
-    logic       mult_valid_n,   mult_valid_q;
-    logic       fpu_valid_n,    fpu_valid_q;
-    logic [1:0] fpu_fmt_n,      fpu_fmt_q;
-    logic [2:0] fpu_rm_n,       fpu_rm_q;
-    logic       lsu_valid_n,    lsu_valid_q;
-    logic       csr_valid_n,    csr_valid_q;
-    logic       branch_valid_n, branch_valid_q;
+    logic          alu_valid_q;
+    logic         mult_valid_q;
+    logic          fpu_valid_q;
+    logic [1:0]      fpu_fmt_q;
+    logic [2:0]       fpu_rm_q;
+    logic          lsu_valid_q;
+    logic          csr_valid_q;
+    logic       branch_valid_q;
+    logic        cvxif_valid_q;
+    logic [31:0] cvxif_off_instr_q;
 
     logic [TRANS_ID_BITS-1:0] trans_id_n, trans_id_q;
     fu_op operator_n, operator_q; // operation to perform
@@ -101,6 +108,10 @@ module issue_read_operands #(
     assign orig_instr = riscv::instruction_t'(issue_instr_i.ex.tval[31:0]);
 
     // ID <-> EX registers
+
+    assign rs1_forwarding_o = operand_a_n[riscv::VLEN-1:0];  //forwarding or unregistered rs1 value
+    assign rs2_forwarding_o = operand_b_n[riscv::VLEN-1:0];  //forwarding or unregistered rs2 value
+
     assign fu_data_o.operand_a = operand_a_q;
     assign fu_data_o.operand_b = operand_b_q;
     assign fu_data_o.fu        = fu_q;
@@ -115,6 +126,8 @@ module issue_read_operands #(
     assign fpu_valid_o         = fpu_valid_q;
     assign fpu_fmt_o           = fpu_fmt_q;
     assign fpu_rm_o            = fpu_rm_q;
+    assign cvxif_valid_o       = CVXIF_PRESENT ? cvxif_valid_q : '0;
+    assign cvxif_off_instr_o   = CVXIF_PRESENT ? cvxif_off_instr_q : '0;
     // ---------------
     // Issue Stage
     // ---------------
@@ -131,6 +144,8 @@ module issue_read_operands #(
                 fu_busy = ~fpu_ready_i;
             LOAD, STORE:
                 fu_busy = ~lsu_ready_i;
+            CVXIF:
+                fu_busy = ~cvxif_ready_i;
             default:
                 fu_busy = 1'b0;
         endcase
@@ -156,12 +171,12 @@ module issue_read_operands #(
         //    as this is an immediate we do not have to wait on anything here
         // 1. check if the source registers are clobbered --> check appropriate clobber list (gpr/fpr)
         // 2. poll the scoreboard
-        if (~issue_instr_i.use_zimm && (is_rs1_fpr(issue_instr_i.op) ? rd_clobber_fpr_i[issue_instr_i.rs1] != NONE
+        if (!issue_instr_i.use_zimm && (is_rs1_fpr(issue_instr_i.op) ? rd_clobber_fpr_i[issue_instr_i.rs1] != NONE
                                                                      : rd_clobber_gpr_i[issue_instr_i.rs1] != NONE)) begin
             // check if the clobbering instruction is not a CSR instruction, CSR instructions can only
             // be fetched through the register file since they can't be forwarded
             // if the operand is available, forward it. CSRs don't write to/from FPR
-            if (rs1_valid_i && (is_rs1_fpr(issue_instr_i.op) ? 1'b1 : rd_clobber_gpr_i[issue_instr_i.rs1] != CSR)) begin
+            if (rs1_valid_i && (is_rs1_fpr(issue_instr_i.op) ? 1'b1 : ((rd_clobber_gpr_i[issue_instr_i.rs1] != CSR) || (issue_instr_i.op == SFENCE_VMA)))) begin
                 forward_rs1 = 1'b1;
             end else begin // the operand is not available -> stall
                 stall = 1'b1;
@@ -171,14 +186,16 @@ module issue_read_operands #(
         if (is_rs2_fpr(issue_instr_i.op) ? rd_clobber_fpr_i[issue_instr_i.rs2] != NONE
                                          : rd_clobber_gpr_i[issue_instr_i.rs2] != NONE) begin
             // if the operand is available, forward it. CSRs don't write to/from FPR
-            if (rs2_valid_i && (is_rs2_fpr(issue_instr_i.op) ? 1'b1 : rd_clobber_gpr_i[issue_instr_i.rs2] != CSR)) begin
+            if (rs2_valid_i && (is_rs2_fpr(issue_instr_i.op) ? 1'b1 : ( (rd_clobber_gpr_i[issue_instr_i.rs2] != CSR) || (issue_instr_i.op == SFENCE_VMA))))  begin
                 forward_rs2 = 1'b1;
             end else begin // the operand is not available -> stall
                 stall = 1'b1;
             end
         end
 
-        if (is_imm_fpr(issue_instr_i.op) && rd_clobber_fpr_i[issue_instr_i.result[REG_ADDR_SIZE-1:0]] != NONE) begin
+    // Only check clobbered gpr for OFFLOADED instruction
+        if (is_imm_fpr(issue_instr_i.op) ? rd_clobber_fpr_i[issue_instr_i.result[REG_ADDR_SIZE-1:0]] != NONE
+                     : issue_instr_i.op == OFFLOAD && NR_RGPR_PORTS == 3 ? rd_clobber_gpr_i[issue_instr_i.result[REG_ADDR_SIZE-1:0]] != NONE : 0) begin
             // if the operand is available, forward it. CSRs don't write to/from FPR so no need to check
             if (rs3_valid_i) begin
                 forward_rs3 = 1'b1;
@@ -195,7 +212,12 @@ module issue_read_operands #(
         operand_b_n = operand_b_regfile;
         // immediates are the third operands in the store case
         // for FP operations, the imm field can also be the third operand from the regfile
-        imm_n      = is_imm_fpr(issue_instr_i.op) ? operand_c_regfile : issue_instr_i.result;
+        if (NR_RGPR_PORTS == 3) begin
+            imm_n  = is_imm_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, operand_c_regfile} :
+                                                    issue_instr_i.op == OFFLOAD ? operand_c_regfile : issue_instr_i.result;
+        end else begin
+            imm_n  = is_imm_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, operand_c_regfile} : issue_instr_i.result;
+        end
         trans_id_n = issue_instr_i.trans_id;
         fu_n       = issue_instr_i.fu;
         operator_n = issue_instr_i.op;
@@ -209,18 +231,18 @@ module issue_read_operands #(
         end
 
         if (forward_rs3) begin
-            imm_n  = rs3_i;
+            imm_n  = NR_RGPR_PORTS == 3 ? rs3_i : {{riscv::XLEN-FLEN{1'b0}}, rs3_i};;
         end
 
         // use the PC as operand a
         if (issue_instr_i.use_pc) begin
-            operand_a_n = issue_instr_i.pc;
+            operand_a_n = {{riscv::XLEN-riscv::VLEN{issue_instr_i.pc[riscv::VLEN-1]}}, issue_instr_i.pc};
         end
 
         // use the zimm as operand a
         if (issue_instr_i.use_zimm) begin
             // zero extend operand a
-            operand_a_n = {52'b0, issue_instr_i.rs1[4:0]};
+            operand_a_n = {{riscv::XLEN-5{1'b0}}, issue_instr_i.rs1[4:0]};
         end
         // or is it an immediate (including PC), this is not the case for a store and control flow instructions
         // also make sure operand B is not already used as an FP operand
@@ -230,53 +252,95 @@ module issue_read_operands #(
     end
 
     // FU select, assert the correct valid out signal (in the next cycle)
-    always_comb begin : unit_valid
-        alu_valid_n    = 1'b0;
-        lsu_valid_n    = 1'b0;
-        mult_valid_n   = 1'b0;
-        fpu_valid_n    = 1'b0;
-        fpu_fmt_n      = 2'b0;
-        fpu_rm_n       = 3'b0;
-        csr_valid_n    = 1'b0;
-        branch_valid_n = 1'b0;
+    // This needs to be like this to make verilator happy. I know its ugly.
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        alu_valid_q    <= 1'b0;
+        lsu_valid_q    <= 1'b0;
+        mult_valid_q   <= 1'b0;
+        fpu_valid_q    <= 1'b0;
+        fpu_fmt_q      <= 2'b0;
+        fpu_rm_q       <= 3'b0;
+        csr_valid_q    <= 1'b0;
+        branch_valid_q <= 1'b0;
+      end else begin
+        alu_valid_q    <= 1'b0;
+        lsu_valid_q    <= 1'b0;
+        mult_valid_q   <= 1'b0;
+        fpu_valid_q    <= 1'b0;
+        fpu_fmt_q      <= 2'b0;
+        fpu_rm_q       <= 3'b0;
+        csr_valid_q    <= 1'b0;
+        branch_valid_q <= 1'b0;
         // Exception pass through:
         // If an exception has occurred simply pass it through
         // we do not want to issue this instruction
-        if (~issue_instr_i.ex.valid && issue_instr_valid_i && issue_ack_o) begin
+        if (!issue_instr_i.ex.valid && issue_instr_valid_i && issue_ack_o) begin
             case (issue_instr_i.fu)
-                ALU:
-                    alu_valid_n    = 1'b1;
-                CTRL_FLOW:
-                    branch_valid_n = 1'b1;
-                MULT:
-                    mult_valid_n   = 1'b1;
+                ALU: begin
+                    alu_valid_q    <= 1'b1;
+                end
+                CTRL_FLOW: begin
+                    branch_valid_q <= 1'b1;
+                end
+                MULT: begin
+                    mult_valid_q   <= 1'b1;
+                end
                 FPU : begin
-                    fpu_valid_n    = 1'b1;
-                    fpu_fmt_n      = orig_instr.rftype.fmt; // fmt bits from instruction
-                    fpu_rm_n       = orig_instr.rftype.rm;  // rm bits from instruction
+                    fpu_valid_q    <= 1'b1;
+                    fpu_fmt_q      <= orig_instr.rftype.fmt; // fmt bits from instruction
+                    fpu_rm_q       <= orig_instr.rftype.rm;  // rm bits from instruction
                 end
                 FPU_VEC : begin
-                    fpu_valid_n    = 1'b1;
-                    fpu_fmt_n      = orig_instr.rvftype.vfmt;         // vfmt bits from instruction
-                    fpu_rm_n       = {2'b0, orig_instr.rvftype.repl}; // repl bit from instruction
+                    fpu_valid_q    <= 1'b1;
+                    fpu_fmt_q      <= orig_instr.rvftype.vfmt;         // vfmt bits from instruction
+                    fpu_rm_q       <= {2'b0, orig_instr.rvftype.repl}; // repl bit from instruction
                 end
-                LOAD, STORE:
-                    lsu_valid_n    = 1'b1;
-                CSR:
-                    csr_valid_n    = 1'b1;
+                LOAD, STORE: begin
+                    lsu_valid_q    <= 1'b1;
+                end
+                CSR: begin
+                    csr_valid_q    <= 1'b1;
+                end
                 default:;
             endcase
         end
         // if we got a flush request, de-assert the valid flag, otherwise we will start this
         // functional unit with the wrong inputs
         if (flush_i) begin
-            alu_valid_n    = 1'b0;
-            lsu_valid_n    = 1'b0;
-            mult_valid_n   = 1'b0;
-            fpu_valid_n    = 1'b0;
-            csr_valid_n    = 1'b0;
-            branch_valid_n = 1'b0;
+            alu_valid_q    <= 1'b0;
+            lsu_valid_q    <= 1'b0;
+            mult_valid_q   <= 1'b0;
+            fpu_valid_q    <= 1'b0;
+            csr_valid_q    <= 1'b0;
+            branch_valid_q <= 1'b0;
         end
+      end
+    end
+
+    if (CVXIF_PRESENT) begin
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          cvxif_valid_q  <= 1'b0;
+          cvxif_off_instr_q  <= 32'b0;
+        end else begin
+          cvxif_valid_q  <= 1'b0;
+          cvxif_off_instr_q  <= 32'b0;
+          if (!issue_instr_i.ex.valid && issue_instr_valid_i && issue_ack_o) begin
+              case (issue_instr_i.fu)
+                  CVXIF: begin
+                      cvxif_valid_q       <= 1'b1;
+                      cvxif_off_instr_q   <= orig_instr;
+                  end
+              default:;
+              endcase
+          end
+          if (flush_i) begin
+              cvxif_valid_q  <= 1'b0;
+              cvxif_off_instr_q <= 32'b0;
+          end
+        end
+      end
     end
 
     // We can issue an instruction if we do not detect that any other instruction is writing the same
@@ -289,7 +353,7 @@ module issue_read_operands #(
         // and that the functional unit we need is not busy
         if (issue_instr_valid_i) begin
             // check that the corresponding functional unit is not busy
-            if (~stall && ~fu_busy) begin
+            if (!stall && !fu_busy) begin
                 // -----------------------------------------
                 // WAW - Write After Write Dependency Check
                 // -----------------------------------------
@@ -329,21 +393,24 @@ module issue_read_operands #(
     // ----------------------
     // Integer Register File
     // ----------------------
-    logic [1:0][63:0] rdata;
-    logic [1:0][4:0]  raddr_pack;
+    logic [NR_RGPR_PORTS-1:0][riscv::XLEN-1:0] rdata;
+    logic [NR_RGPR_PORTS-1:0][4:0]  raddr_pack;
 
     // pack signals
     logic [NR_COMMIT_PORTS-1:0][4:0]  waddr_pack;
-    logic [NR_COMMIT_PORTS-1:0][63:0] wdata_pack;
+    logic [NR_COMMIT_PORTS-1:0][riscv::XLEN-1:0] wdata_pack;
     logic [NR_COMMIT_PORTS-1:0]       we_pack;
-    assign raddr_pack = {issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]};
-    assign waddr_pack = {waddr_i[1],  waddr_i[0]};
-    assign wdata_pack = {wdata_i[1],  wdata_i[0]};
-    assign we_pack    = {we_gpr_i[1], we_gpr_i[0]};
+    assign raddr_pack = NR_RGPR_PORTS == 3 ? {issue_instr_i.result[4:0], issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]}
+                                           : {issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]};
+    for (genvar i = 0; i < NR_COMMIT_PORTS; i++) begin : gen_write_back_port
+        assign waddr_pack[i] = waddr_i[i];
+        assign wdata_pack[i] = wdata_i[i];
+        assign we_pack[i]    = we_gpr_i[i];
+    end
 
     ariane_regfile #(
-        .DATA_WIDTH     ( 64              ),
-        .NR_READ_PORTS  ( 2               ),
+        .DATA_WIDTH     ( riscv::XLEN     ),
+        .NR_READ_PORTS  ( NR_RGPR_PORTS   ),
         .NR_WRITE_PORTS ( NR_COMMIT_PORTS ),
         .ZERO_REG_ZERO  ( 1               )
     ) i_ariane_regfile (
@@ -363,12 +430,14 @@ module issue_read_operands #(
 
     // pack signals
     logic [2:0][4:0]  fp_raddr_pack;
-    logic [NR_COMMIT_PORTS-1:0][63:0] fp_wdata_pack;
+    logic [NR_COMMIT_PORTS-1:0][riscv::XLEN-1:0] fp_wdata_pack;
 
     generate
         if (FP_PRESENT) begin : float_regfile_gen
             assign fp_raddr_pack = {issue_instr_i.result[4:0], issue_instr_i.rs2[4:0], issue_instr_i.rs1[4:0]};
-            assign fp_wdata_pack = {wdata_i[1][FLEN-1:0], wdata_i[0][FLEN-1:0]};
+            for (genvar i = 0; i < NR_COMMIT_PORTS; i++) begin : gen_fp_wdata_pack
+                assign fp_wdata_pack[i] = {wdata_i[i][FLEN-1:0]};
+            end
 
             ariane_regfile #(
                 .DATA_WIDTH     ( FLEN            ),
@@ -380,7 +449,7 @@ module issue_read_operands #(
                 .raddr_i   ( fp_raddr_pack ),
                 .rdata_o   ( fprdata       ),
                 .waddr_i   ( waddr_pack    ),
-                .wdata_i   ( wdata_pack    ),
+                .wdata_i   ( fp_wdata_pack ),
                 .we_i      ( we_fpr_i      ),
                 .*
             );
@@ -389,44 +458,29 @@ module issue_read_operands #(
         end
     endgenerate
 
-    assign operand_a_regfile = is_rs1_fpr(issue_instr_i.op) ? fprdata[0] : rdata[0];
-    assign operand_b_regfile = is_rs2_fpr(issue_instr_i.op) ? fprdata[1] : rdata[1];
-    assign operand_c_regfile = fprdata[2];
+    assign operand_a_regfile = is_rs1_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, fprdata[0]} : rdata[0];
+    assign operand_b_regfile = is_rs2_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, fprdata[1]} : rdata[1];
+    assign operand_c_regfile = NR_RGPR_PORTS == 3 ? (is_imm_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, fprdata[2]} : rdata[2])
+                                                  : fprdata[2];
 
     // ----------------------
     // Registers (ID <-> EX)
     // ----------------------
     always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (~rst_ni) begin
+        if (!rst_ni) begin
             operand_a_q           <= '{default: 0};
             operand_b_q           <= '{default: 0};
-            imm_q                 <= 64'b0;
-            alu_valid_q           <= 1'b0;
-            branch_valid_q        <= 1'b0;
-            mult_valid_q          <= 1'b0;
-            fpu_valid_q           <= 1'b0;
-            fpu_fmt_q             <= 2'b0;
-            fpu_rm_q              <= 3'b0;
-            lsu_valid_q           <= 1'b0;
-            csr_valid_q           <= 1'b0;
+            imm_q                 <= '0;
             fu_q                  <= NONE;
             operator_q            <= ADD;
-            trans_id_q            <= 5'b0;
-            pc_o                  <= 64'b0;
+            trans_id_q            <= '0;
+            pc_o                  <= '0;
             is_compressed_instr_o <= 1'b0;
-            branch_predict_o      <= '{default: 0};
+            branch_predict_o      <= {cf_t'(0), {riscv::VLEN{1'b0}}};
         end else begin
             operand_a_q           <= operand_a_n;
             operand_b_q           <= operand_b_n;
             imm_q                 <= imm_n;
-            alu_valid_q           <= alu_valid_n;
-            branch_valid_q        <= branch_valid_n;
-            mult_valid_q          <= mult_valid_n;
-            fpu_valid_q           <= fpu_valid_n;
-            fpu_fmt_q             <= fpu_fmt_n;
-            fpu_rm_q              <= fpu_rm_n;
-            lsu_valid_q           <= lsu_valid_n;
-            csr_valid_q           <= csr_valid_n;
             fu_q                  <= fu_n;
             operator_q            <= operator_n;
             trans_id_q            <= trans_id_n;
@@ -438,13 +492,15 @@ module issue_read_operands #(
 
     //pragma translate_off
     `ifndef VERILATOR
+    initial begin
+        assert (NR_RGPR_PORTS == 2 || (NR_RGPR_PORTS == 3 && CVXIF_PRESENT))
+        else $fatal(1, "If CVXIF is enable, ariane regfile can have either 2 or 3 read ports. Else it has 2 read ports.");
+    end
+
      assert property (
         @(posedge clk_i) (branch_valid_q) |-> (!$isunknown(operand_a_q) && !$isunknown(operand_b_q)))
         else $warning ("Got unknown value in one of the operands");
 
-    initial begin
-        assert (NR_COMMIT_PORTS == 2) else $error("Only two commit ports are supported at the moment!");
-    end
     `endif
     //pragma translate_on
 endmodule
