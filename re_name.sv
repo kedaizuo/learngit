@@ -1,26 +1,15 @@
+// Copyright (C) 2017 ETH Zurich, University of Bologna
+//
+// Licensed under the Solderpad Hardware Licence, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0 WITH SHL-2.0
+// You may obtain a copy of the License at https://solderpad.org/licenses/
+//
 // Author: Florian Zaruba, ETH Zurich
 // Date: 03.10.2017
 // Description: Re-name registers
-//
-//
-// Copyright (C) 2017 ETH Zurich, University of Bologna
-// All rights reserved.
-//
-// This code is under development and not yet released to the public.
-// Until it is released, the code is under the copyright of ETH Zurich and
-// the University of Bologna, and may contain confidential and/or unpublished
-// work. Any reuse/redistribution is strictly forbidden without written
-// permission from ETH Zurich.
-//
-// Bug fixes and contributions will eventually be released under the
-// SolderPad open hardware license in the context of the PULP platform
-// (http://www.pulp-platform.org), under the copyright of ETH Zurich and the
-// University of Bologna.
-//
 
-import ariane_pkg::*;
-
-module re_name (
+module re_name import ariane_pkg::*; (
     input  logic                                   clk_i,    // Clock
     input  logic                                   rst_ni,   // Asynchronous reset active low
     input  logic                                   flush_i,  // Flush renaming state
@@ -80,9 +69,9 @@ module re_name (
         issue_instr_o.rs2 = { ENABLE_RENAME & name_bit_rs2, issue_instr_i.rs2[4:0] };
 
         // re-name the third operand in imm if it's actually an operand
-        if (is_imm_fpr(issue_instr_i.op))
+        if (is_imm_fpr(issue_instr_i.op) || (issue_instr_i.op == OFFLOAD && ariane_pkg::NR_RGPR_PORTS == 3)) begin
             issue_instr_o.result = { ENABLE_RENAME & name_bit_rs3, issue_instr_i.result[4:0]};
-
+        end
         // re-name the destination register
         issue_instr_o.rd = { ENABLE_RENAME & name_bit_rd, issue_instr_i.rd[4:0] };
 
