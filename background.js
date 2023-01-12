@@ -1,30 +1,3 @@
-/*{
-    "manifest_version":2,
-    "name":"PageJottings",
-    "version":"1.0",
-    "icons":{
-        "16":"icon16.png",
-        "48":"icon48.png",
-        "128":"icon128.png"
-    },
-    "description":"Whenver you visit a web page, you want to write something to look back at, like a jotting. The functions include creating local accounts, inputing texts.",
-    "permissions":[
-        "storage",
-        "https://localhost:3000/"
-    ],
-    
-    "browser_action":{
-
-    },
-    "page_options": "./options.html",
-    "background":{
-        "scripts":["./background.js"]
-        
-        
-    }
-    
-    
-} */
 let user_sign_in=false;
 chrome.browserAction.onClicked.addListener(function(){
     if(!user_sign_in){
@@ -51,59 +24,55 @@ chrome.browserAction.onClicked.addListener(function(){
 function flipUserStatus(signIn,user_info) {
     
    
-    
-        if (signIn) {
-            return fetch('http://localhost:3000/login', {
-                method: 'GET',
-                headers: {
-                    'Authorization': 'Basic ' + btoa(`${user_info.email}:${user_info.pass}`)
-                }
-            })
-                .then(res => {
-                    return new Promise(resolve => {
-                        if (res.status !== 200) resolve('fail')
-    
-                        chrome.storage.local.set({ userStatus: signIn, user_info }, function (response) {
-                            if (chrome.runtime.lastError) resolve('fail');
-    
-                            user_signed_in = signIn;
-                            resolve('success');
-                        });
-                    })
-                })
-                .catch(err => console.log(err));
-        } 
-        else if (!signIn) {
-            // fetch the localhost:3000/logout route
+    if(signIn){
+        return fetch('https://localhost:3000/login', {
+            method:"GET",
+            headers:{
+                'Authorization':'Basic'+btoa(`${user_info.email}:${user_info.pass}`)
+            }
+        }).then(res=>{
             return new Promise(resolve => {
-                chrome.storage.local.get(['userStatus', 'user_info'], function (response) {
-                    console.log(response);
-                    if (chrome.runtime.lastError) resolve('fail');
-        
-                    if (response.userStatus === undefined) resolve('fail');
-        
-                    fetch('http://localhost:3000/logout', {
-                        method: 'GET',
-                        headers: {
-                            'Authorization': 'Basic ' + btoa(`${response.user_info.email}:${response.user_info.pass}`)
-                        }
+                if(res.status!='200') resolve('fail');
+                chrome.storage.local.set({userStatus:signIn,user_info},function(response){
+                    if(chrome.runtime.lastError) resolve('fail');
+                    user_sign_in= true;
+                    resolve('success');
+                })
+            })
+        }).catch(/*err=>{
+            return new Promise(reject=>{
+                reject('fail'); 
+            })
+        }*/
+        err=>{
+            console.log(err);
+        })
+    }
+    else {
+        return new Promise(resolve => {
+            chrome.storage.local.get(['userStatus',user_info], function(response){
+                if(chrome.runtime.lastError) resolve('fail');
+                if(response.userStatus==undefined) resolve('fail');
+                fetch('https://localhost:3000/logout',{
+                    methord:'GET',
+                    headers:{
+                        'Authorization':'Basic'+btoa(`${response.user_info.email}:${response.user_info.pass}`)
+                    }
+                    
+                }).then(res =>{
+                    if(res.status!='200') resolve('fail');
+                    
+                    chrome.storage.local.set({userStatus:signIn,user_info:{}},function(res){
+                        if(chrome.runtime.lastError) resolve('fail');
+                        user_sign_in=false;
+                        resolve('success');
                     })
-                        .then(res => {
-                            console.log(res);
-                            if (res.status !== 200) resolve('fail');
-        
-                            chrome.storage.local.set({ userStatus: signIn, user_info: {} }, function (response) {
-                                if (chrome.runtime.lastError) resolve('fail');
-        
-                                user_signed_in = signIn;
-                                resolve('success');
-                            });
-                        })
-                        .catch(err => console.log(err));
-                });
-            });
-        }
-
+                }).catch(
+                    err=>console.log(err)
+                )
+            })
+        })
+    }
 }
 /*
 chrome.runtime.onMessage.addListener((request,sender,sendResponse)=>{
