@@ -1,3 +1,58 @@
+/*{
+    "manifest_version":2,
+    "name":"PageJottings",
+    "version":"1.0",
+    "icons":{
+        "16":"icon16.png",
+        "48":"icon48.png",
+        "128":"icon128.png"
+    },
+    "description":"Whenver you visit a web page, you want to write something to look back at, like a jotting. The functions include creating local accounts, inputing texts.",
+    "permissions":[
+        "storage",
+        "https://localhost:3000/"
+    ],
+    
+    "browser_action":{
+
+    },
+    "page_options": "./options.html",
+    "background":{
+        "scripts":["./background.js"]
+        
+        
+    }
+    
+    
+} */
+let user_sign_in=false;
+
+chrome.browserAction.onClicked.addListener(function(){
+    if(!user_sign_in){
+        
+        chrome.windows.create({
+            url:'./popup-sign-in.html',
+            width:300,
+            height:600,
+            focused:true
+        },function(){
+            console.log("get clicked");
+        });
+        
+    }
+    else {
+        chrome.windows.create({
+            url:'./popup-sign-out.html',
+            width:300,
+            height:600,
+            focused:true
+        })
+    }
+})
+
+
+
+
 function flipUserStatus(signIn,user_info) {
     
    
@@ -55,3 +110,37 @@ function flipUserStatus(signIn,user_info) {
         }
 
 }
+/*
+chrome.runtime.onMessage.addListener((request,sender,sendResponse)=>{
+    console.log(request.message);
+    if (request.message == 'login'){
+        console.log('5');
+        flipUserStatus(true,request.payload)
+            .then(res=>sendResponse(res))
+            .catch(err => console.log(err));
+            return true;
+    }
+
+    else if (request.message=='logout'){
+
+    }
+    else if (request.message == 'userStatus'){
+
+    }
+});*/
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.message === 'login') {
+        
+        flipUserStatus(true, request.payload)
+            .then(res => sendResponse(res))
+            .catch(err => console.log(err));
+
+        return true;
+    } else if (request.message === 'logout') {
+        flipUserStatus(false, null)
+            .then(res => sendResponse(res))
+            .catch(err => console.log(err));
+
+        return true;
+    } 
+});
