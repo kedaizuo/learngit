@@ -26,7 +26,6 @@
     
 } */
 let user_sign_in=false;
-
 chrome.browserAction.onClicked.addListener(function(){
     if(!user_sign_in){
         
@@ -49,10 +48,6 @@ chrome.browserAction.onClicked.addListener(function(){
         })
     }
 })
-
-
-
-
 function flipUserStatus(signIn,user_info) {
     
    
